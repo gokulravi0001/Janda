@@ -1,0 +1,27 @@
+{
+  "name": "personal-discord-user-install-bot",
+  "version": "1.0.0",
+  "description": "Personal private Discord application using Discord User Install functionality",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "deploy": "node deploy-commands.js",
+    "auth": "node manage-auth.js",
+    "auth:list": "node manage-auth.js list",
+    "auth:add": "node manage-auth.js add",
+    "auth:remove": "node manage-auth.js remove"
+  },
+  "keywords": [
+    "discord",
+    "discordjs",
+    "user-install",
+    "personal-bot",
+    "slash-commands"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.28.1",
+    "dotenv": "^18.0.9"
+  }
+}
