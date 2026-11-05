@@ -4,6 +4,7 @@
  */
 
 const http = require('http');
+const https = require('https');
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const config = require('./config');
 const { initDatabase } = require('./database');
@@ -35,11 +36,34 @@ function startHealthServer() {
   return server;
 }
 
+// Keep-alive self-pinger to prevent Render free tier from sleeping after 15 minutes
+function startKeepAlive() {
+  const baseUrl = process.env.RENDER_EXTERNAL_URL || 'https://janda-user-bot.onrender.com';
+  const pingUrl = `${baseUrl}/health`;
+  logger.info(`Starting keep-alive background pinger for ${pingUrl} (every 9 minutes)`);
+
+  const timer = setInterval(() => {
+    https.get(pingUrl, (res) => {
+      logger.info(`Keep-alive ping sent to ${pingUrl} - Status: ${res.statusCode}`);
+    }).on('error', (err) => {
+      logger.warn(`Keep-alive ping error: ${err.message}`);
+    });
+  }, 9 * 60 * 1000); // 9 minutes
+
+  return timer;
+}
+
 async function bootstrap() {
   logger.info('Starting Personal Discord User-Install Bot...');
 
   // Start HTTP health server for Render compatibility
   const healthServer = startHealthServer();
+
+  // Start Keep-Alive pinger on cloud deployment
+  let keepAliveTimer = null;
+  if (process.env.RENDER || process.env.PORT) {
+    keepAliveTimer = startKeepAlive();
+  }
 
   // 1. Initialize persistent storage
   await initDatabase();
@@ -64,6 +88,7 @@ async function bootstrap() {
   // 4. Graceful shutdown handlers
   const handleExit = (signal) => {
     logger.info(`Received ${signal}. Shutting down gracefully...`);
+    if (keepAliveTimer) clearInterval(keepAliveTimer);
     if (healthServer) healthServer.close();
     client.destroy();
     process.exit(0);

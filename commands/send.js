@@ -10,7 +10,8 @@ const {
   ApplicationIntegrationType,
   InteractionContextType,
   MessageFlags,
-  ChannelType
+  ChannelType,
+  PermissionFlagsBits
 } = require('discord.js');
 const logger = require('../utils/logger');
 
@@ -36,7 +37,7 @@ module.exports = {
     .addChannelOption(option =>
       option
         .setName('channel')
-        .setDescription('Destination channel (optional; defaults to the current channel)')
+        .setDescription('Destination channel (optional; defaults to current channel)')
         .addChannelTypes(
           ChannelType.GuildText,
           ChannelType.GuildAnnouncement,
@@ -71,66 +72,57 @@ module.exports = {
 
     // CASE 1: A specific destination channel was selected that differs from current channel
     if (channelOption && channelOption.id !== interaction.channelId) {
+      // Defer ephemerally so network fetches to external channels never hit the 3-second timeout
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
       try {
         const targetChannel = await interaction.client.channels.fetch(channelOption.id).catch(() => null);
 
         if (!targetChannel || !targetChannel.isTextBased() || typeof targetChannel.send !== 'function') {
-          return interaction.reply({
-            content: `❌ **Delivery Failed**: Cannot access or send messages to <#${channelOption.id}>.\n*Note: To deliver messages to a different channel, the bot application must be a member of that guild with the Send Messages permission.*`,
-            flags: MessageFlags.Ephemeral
+          return interaction.editReply({
+            content: `❌ **Delivery Failed**: Cannot access or send messages to <#${channelOption.id}>.\n*Note: To deliver messages to a different channel, the bot application must be a member of that guild with the Send Messages permission.*`
           });
         }
 
         await targetChannel.send({ content: message });
 
-        return interaction.reply({
-          content: `✅ **Success**: Message sent to <#${targetChannel.id}>.`,
-          flags: MessageFlags.Ephemeral
+        return interaction.editReply({
+          content: `✅ **Success**: Message sent to <#${targetChannel.id}>.`
         });
       } catch (error) {
         logger.error(`Failed to send message to channel ${channelOption.id}:`, error);
-        return interaction.reply({
-          content: `❌ **Failed to send message**: ${error.message}`,
-          flags: MessageFlags.Ephemeral
+        return interaction.editReply({
+          content: `❌ **Failed to send message**: ${error.message}`
         });
       }
     }
 
-    // CASE 2: No specific channel was chosen (or current channel was chosen)
-    // This is the core User-Install experience where the app can be used anywhere.
-    try {
-      let sentViaChannel = false;
+    // CASE 2: Current channel context (standard User-Install behavior)
+    // Check if the bot has traditional guild member presence with SendMessages permission
+    const isBotInGuild = interaction.guildId && interaction.client.guilds.cache.has(interaction.guildId);
+    const hasSendPermission = interaction.appPermissions && interaction.appPermissions.has(PermissionFlagsBits.SendMessages);
 
-      // First attempt: Check if the bot can send a direct standalone channel message
-      // (This succeeds if the bot is present in the server or in direct channel contexts)
-      if (interaction.channel && typeof interaction.channel.send === 'function') {
-        try {
-          await interaction.channel.send({ content: message });
-          sentViaChannel = true;
-        } catch {
-          // If the bot lacks traditional channel access (standard for user-installed apps in external servers),
-          // fallback to Discord interaction response flow.
-          sentViaChannel = false;
-        }
-      }
-
-      if (sentViaChannel) {
-        // Sent as normal message; provide ephemeral confirmation to the user
+    if (isBotInGuild && hasSendPermission && interaction.channel && typeof interaction.channel.send === 'function') {
+      try {
+        await interaction.channel.send({ content: message });
         return await interaction.reply({
           content: '✅ **Success**: Message sent successfully.',
           flags: MessageFlags.Ephemeral
         });
+      } catch (err) {
+        logger.warn('Direct channel.send failed, falling back to interaction reply:', err.message);
       }
+    }
 
-      // Second attempt: Send message via interaction response
-      // This works in any server/DM where Discord user-install interactions are supported!
+    // Primary User-Install path: Post directly via the interaction response (instant, <50ms response time)
+    try {
       await interaction.reply({ content: message });
 
       // Provide ephemeral confirmation to the authorized user
       await interaction.followUp({
         content: '✅ **Success**: Message sent successfully via application interaction.',
         flags: MessageFlags.Ephemeral
-      });
+      }).catch(() => {});
     } catch (error) {
       logger.error('Failed to send message in current interaction context:', error);
 
