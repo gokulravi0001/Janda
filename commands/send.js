@@ -4,7 +4,7 @@
  * Core feature: Sends a message to the current interaction channel or a specified channel.
  * Options:
  *   - message (required string): Message content to send
- *   - count (optional integer): Number of times to send the message (1 - 25, default 1)
+ *   - count (optional integer): Number of times to send the message (1 - 1000, default 1)
  *   - channel (optional channel): Destination channel
  * Configured strictly for USER_INSTALL across Guild, BotDM, and PrivateChannel contexts.
  */
@@ -43,10 +43,10 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('count')
-        .setDescription('Number of times to send the message (optional; default: 1, max: 25)')
+        .setDescription('Number of times to send the message (optional; default: 1, max: 1000)')
         .setRequired(false)
         .setMinValue(1)
-        .setMaxValue(25)
+        .setMaxValue(1000)
     )
     .addChannelOption((option) =>
       option
@@ -101,15 +101,21 @@ module.exports = {
 
         let sentCount = 0;
         for (let i = 0; i < count; i++) {
-          await targetChannel.send({ content: message });
-          sentCount++;
+          try {
+            await targetChannel.send({ content: message });
+            sentCount++;
+          } catch (err) {
+            logger.warn(`Stopped sending at ${sentCount}/${count} to channel ${channelOption.id}:`, err.message);
+            break;
+          }
+
           if (i < count - 1) {
-            await sleep(600); // Buffer to prevent rate limiting
+            await sleep(500); // 500ms buffer to respect rate limits
           }
         }
 
         return interaction.editReply({
-          content: `✅ **Success**: Sent ${sentCount} message${sentCount > 1 ? 's' : ''} to <#${targetChannel.id}>.`
+          content: `✅ **Success**: Sent ${sentCount} of ${count} message${sentCount > 1 ? 's' : ''} to <#${targetChannel.id}>.`
         });
       } catch (error) {
         logger.error(`Failed to send message to channel ${channelOption.id}:`, error);
@@ -128,15 +134,21 @@ module.exports = {
       try {
         let sentCount = 0;
         for (let i = 0; i < count; i++) {
-          await interaction.channel.send({ content: message });
-          sentCount++;
+          try {
+            await interaction.channel.send({ content: message });
+            sentCount++;
+          } catch (err) {
+            logger.warn(`Stopped sending at ${sentCount}/${count}:`, err.message);
+            break;
+          }
+
           if (i < count - 1) {
-            await sleep(600);
+            await sleep(500);
           }
         }
 
         return await interaction.reply({
-          content: `✅ **Success**: Sent ${sentCount} message${sentCount > 1 ? 's' : ''} successfully.`,
+          content: `✅ **Success**: Sent ${sentCount} of ${count} message${sentCount > 1 ? 's' : ''} successfully.`,
           flags: MessageFlags.Ephemeral
         });
       } catch (err) {
@@ -152,15 +164,20 @@ module.exports = {
 
       // Subsequent messages are sent using interaction followUp webhooks
       for (let i = 1; i < count; i++) {
-        await sleep(600); // 600ms buffer to respect Discord rate limits
-        await interaction.followUp({ content: message });
-        sentCount++;
+        await sleep(500); // 500ms buffer to respect Discord webhook rate limits
+        try {
+          await interaction.followUp({ content: message });
+          sentCount++;
+        } catch (err) {
+          logger.warn(`Interaction followUp stopped at ${sentCount}/${count}:`, err.message);
+          break;
+        }
       }
 
       // Provide ephemeral confirmation to the authorized user
-      const confirmationText = sentCount === 1
+      const confirmationText = count === 1
         ? '✅ **Success**: Message sent successfully via application interaction.'
-        : `✅ **Success**: Sent ${sentCount} messages successfully via application interaction.`;
+        : `✅ **Success**: Sent ${sentCount} of ${count} messages successfully via application interaction.`;
 
       await interaction.followUp({
         content: confirmationText,
