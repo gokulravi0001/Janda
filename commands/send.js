@@ -21,6 +21,99 @@ const logger = require('../utils/logger');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Sends messages sequentially via channel.send with automated rate-limit retry.
+ */
+async function sendMessagesViaChannel(channel, message, count) {
+  let sentCount = 0;
+
+  while (sentCount < count) {
+    if (sentCount > 0) {
+      await sleep(800); // 800ms base pacing
+    }
+
+    try {
+      await channel.send({ content: message });
+      sentCount++;
+    } catch (err) {
+      logger.warn(`Channel.send attempt failed on ${sentCount + 1}/${count}: ${err.message}`);
+
+      // Handle Discord rate limits (429) by waiting and retrying instead of giving up
+      const isRateLimit = err.status === 429 || (err.message && err.message.toLowerCase().includes('rate limit'));
+      if (isRateLimit || err.retryAfter) {
+        const waitMs = err.retryAfter
+          ? (typeof err.retryAfter === 'number' && err.retryAfter < 100 ? err.retryAfter * 1000 : err.retryAfter) + 300
+          : 2000;
+        logger.info(`Channel rate limit encountered. Pausing for ${waitMs}ms before retrying message ${sentCount + 1}...`);
+        await sleep(waitMs);
+        continue;
+      }
+
+      // For transient errors, wait and retry once
+      await sleep(1500);
+      try {
+        await channel.send({ content: message });
+        sentCount++;
+      } catch (fatalErr) {
+        logger.error(`Unrecoverable error on message ${sentCount + 1}/${count}:`, fatalErr.message);
+        break;
+      }
+    }
+  }
+
+  return sentCount;
+}
+
+/**
+ * Sends messages sequentially via interaction response & followUps with automated rate-limit retry.
+ */
+async function sendMessagesViaInteraction(interaction, message, count) {
+  // 1. First message is sent immediately via the interaction reply (<50ms)
+  await interaction.reply({ content: message });
+  let sentCount = 1;
+
+  // 2. Subsequent messages are sent using interaction followUp webhooks
+  while (sentCount < count) {
+    await sleep(800); // 800ms base pacing to respect webhook limits
+
+    try {
+      await interaction.followUp({ content: message });
+      sentCount++;
+    } catch (err) {
+      logger.warn(`FollowUp attempt failed on ${sentCount + 1}/${count}: ${err.message}`);
+
+      // If the interaction token expired (15-minute Discord limit)
+      if (err.code === 10062 || (err.message && err.message.includes('Unknown interaction'))) {
+        logger.error('Interaction token expired (15-minute Discord limit reached). Stopping loop.');
+        break;
+      }
+
+      // Handle Discord rate limits (429) by waiting and retrying instead of breaking!
+      const isRateLimit = err.status === 429 || (err.message && err.message.toLowerCase().includes('rate limit'));
+      if (isRateLimit || err.retryAfter) {
+        const waitMs = err.retryAfter
+          ? (typeof err.retryAfter === 'number' && err.retryAfter < 100 ? err.retryAfter * 1000 : err.retryAfter) + 300
+          : 2000;
+        logger.info(`Interaction webhook rate limit hit. Pausing for ${waitMs}ms before retrying message ${sentCount + 1}...`);
+        await sleep(waitMs);
+        continue; // Retry sending this message!
+      }
+
+      // For other transient errors, wait and retry once
+      await sleep(1500);
+      try {
+        await interaction.followUp({ content: message });
+        sentCount++;
+      } catch (fatalErr) {
+        logger.error(`Unrecoverable error on message ${sentCount + 1}/${count}:`, fatalErr.message);
+        break;
+      }
+    }
+  }
+
+  return sentCount;
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('send')
@@ -99,20 +192,7 @@ module.exports = {
           });
         }
 
-        let sentCount = 0;
-        for (let i = 0; i < count; i++) {
-          try {
-            await targetChannel.send({ content: message });
-            sentCount++;
-          } catch (err) {
-            logger.warn(`Stopped sending at ${sentCount}/${count} to channel ${channelOption.id}:`, err.message);
-            break;
-          }
-
-          if (i < count - 1) {
-            await sleep(500); // 500ms buffer to respect rate limits
-          }
-        }
+        const sentCount = await sendMessagesViaChannel(targetChannel, message, count);
 
         return interaction.editReply({
           content: `✅ **Success**: Sent ${sentCount} of ${count} message${sentCount > 1 ? 's' : ''} to <#${targetChannel.id}>.`
@@ -132,20 +212,7 @@ module.exports = {
 
     if (isBotInGuild && hasSendPermission && interaction.channel && typeof interaction.channel.send === 'function') {
       try {
-        let sentCount = 0;
-        for (let i = 0; i < count; i++) {
-          try {
-            await interaction.channel.send({ content: message });
-            sentCount++;
-          } catch (err) {
-            logger.warn(`Stopped sending at ${sentCount}/${count}:`, err.message);
-            break;
-          }
-
-          if (i < count - 1) {
-            await sleep(500);
-          }
-        }
+        const sentCount = await sendMessagesViaChannel(interaction.channel, message, count);
 
         return await interaction.reply({
           content: `✅ **Success**: Sent ${sentCount} of ${count} message${sentCount > 1 ? 's' : ''} successfully.`,
@@ -156,23 +223,9 @@ module.exports = {
       }
     }
 
-    // Primary User-Install path: Post directly via the interaction response (instant, <50ms response time)
+    // Primary User-Install path: Post directly via the interaction response & followups with rate-limit retries
     try {
-      // First message is sent as the immediate interaction reply
-      await interaction.reply({ content: message });
-      let sentCount = 1;
-
-      // Subsequent messages are sent using interaction followUp webhooks
-      for (let i = 1; i < count; i++) {
-        await sleep(500); // 500ms buffer to respect Discord webhook rate limits
-        try {
-          await interaction.followUp({ content: message });
-          sentCount++;
-        } catch (err) {
-          logger.warn(`Interaction followUp stopped at ${sentCount}/${count}:`, err.message);
-          break;
-        }
-      }
+      const sentCount = await sendMessagesViaInteraction(interaction, message, count);
 
       // Provide ephemeral confirmation to the authorized user
       const confirmationText = count === 1
